@@ -1,3 +1,6 @@
+*NOTE*: this project is forked from https://github.com/lahwaacz/sxlock
+
+
 sxlock - simple X screen locker
 ===============================
 
@@ -22,6 +25,9 @@ Requirements
  - libXrandr (RandR support)
  - PAM
 
+ - giblib
+ - imlib2
+
 
 Installation
 ------------
@@ -30,7 +36,7 @@ Arch Linux users can install this package from the [AUR](https://aur.archlinux.o
 
 For manual installation just install dependencies, checkout and make:
 
-    git clone git://github.com/lahwaacz/sxlock.git
+    git clone https://github.com/ktravis/sxlock
     cd ./sxlock
     make
     ./sxlock

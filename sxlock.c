@@ -25,6 +25,9 @@
  *
  */
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 #include <stdarg.h>     // variable arguments number
 #include <stdlib.h>
 #include <stdio.h>
@@ -41,6 +44,9 @@
 #include <X11/extensions/dpms.h>
 #include <X11/extensions/Xrandr.h>
 #include <security/pam_appl.h>
+#include <giblib/giblib.h>
+
+#include "ziggurat_inline.h"
 
 #ifdef __GNUC__
     #define UNUSED(x) UNUSED_ ## x __attribute__((__unused__))
@@ -62,7 +68,6 @@ typedef struct WindowPositionInfo {
 
 static int conv_callback(int num_msgs, const struct pam_message **msg, struct pam_response **resp, void *appdata_ptr);
 
-
 /* command-line arguments */
 static char* opt_font;
 static char* opt_username;
@@ -80,7 +85,6 @@ struct pam_conv conv = { conv_callback, NULL };
 
 /* Holds the password you enter */
 static char password[256];
-
 
 static void
 die(const char *errstr, ...) {
@@ -148,6 +152,8 @@ handle_signal(int sig) {
     die("Caught signal %d; dying\n", sig);
 }
 
+Imlib_Image image;
+
 void
 main_loop(Window w, GC gc, XFontStruct* font, WindowPositionInfo* info, char passdisp[256], char* username, XColor UNUSED(black), XColor white, XColor red, Bool hidelength) {
     XEvent event;
@@ -159,6 +165,28 @@ main_loop(Window w, GC gc, XFontStruct* font, WindowPositionInfo* info, char pas
     Bool failed = False;
 
     XSync(dpy, False);
+
+    /*char *img_data = malloc(ww * hh * 4);*/
+    /*imlib_context_set_image(image);*/
+    /*[>imlib_image_set_has_alpha(1);<]*/
+    /*DATA32 *imagedata = imlib_image_get_data();*/
+    /*memcpy(imagedata, img_data, ww * hh * 4);*/
+
+    /*int img_x, img_y, img_n;*/
+    /*unsigned char *img_data = stbi_load(img_filename, &img_x, &img_y, &img_n, 4);*/
+    /*if (!img_data) {*/
+        /*fprintf(stderr, "Image failed to load\n");*/
+        /*return;*/
+    /*}*/
+    /*// image loads as BGRA */
+    /*for (int i = 0; i < img_x * img_y; i++) {*/
+        /*unsigned char *p = &img_data[i*4];*/
+        /*unsigned char x = p[0];*/
+        /*p[0] = p[2];*/
+        /*p[2] = x;*/
+    /*}*/
+
+    /*XImage *img = XCreateImage(dpy, DefaultVisual(dpy, DefaultScreen(dpy)), 24, ZPixmap, 0, img_data, info->output_width, info->output_height, 32, 0);*/
 
     /* define base coordinates - middle of screen */
     int base_x = info->output_x + info->output_width / 2;
@@ -176,6 +204,8 @@ main_loop(Window w, GC gc, XFontStruct* font, WindowPositionInfo* info, char pas
         XTextExtents(font, passdisp, strlen(username), &dir, &ascent, &descent, &overall);
     }
 
+    /*XPutImage(dpy, w, gc, img, 0, 0, info->output_x, info->output_y, info->output_width, info->output_height);*/
+    gib_imlib_render_image_on_drawable(w, image, info->output_x, info->output_y, 0, 0, 0);
     /* main event loop */
     while(running && !XNextEvent(dpy, &event)) {
         if (sleepmode && using_dpms)
@@ -183,6 +213,11 @@ main_loop(Window w, GC gc, XFontStruct* font, WindowPositionInfo* info, char pas
 
         /* update window if no events pending */
         if (!XPending(dpy)) {
+
+            /*XSetForeground(dpy, gc, red.pixel);*/
+            /*XFillRectangle(dpy, w, gc, info->output_x, info->output_y, info->output_width, info->output_height);*/
+            /*XSetForeground(dpy, gc, white.pixel);*/
+
             int x;
             /* draw username and line */
             x = base_x - XTextWidth(font, username, strlen(username)) / 2;
@@ -190,7 +225,11 @@ main_loop(Window w, GC gc, XFontStruct* font, WindowPositionInfo* info, char pas
             XDrawLine(dpy, w, gc, line_x_left, base_y, line_x_right, base_y);
 
             /* clear old passdisp */
-            XClearArea(dpy, w, info->output_x, base_y + 20, info->output_width, ascent + descent, False);
+            /*XClearArea(dpy, w, info->output_x, base_y + 20, info->output_width, ascent + descent, False);*/
+
+            /*XPutImage(dpy, w, gc, img, 0, base_y+20, info->output_x, base_y+20, info->output_width, ascent+descent);*/
+
+            gib_imlib_render_image_part_on_drawable_at_size	(w, image, 0, base_y+20, info->output_width, ascent+descent, info->output_x, base_y+20, info->output_width, ascent+descent, 0, 0, 0);
 
             /* draw new passdisp or 'auth failed' */
             if (failed) {
@@ -248,6 +287,7 @@ main_loop(Window w, GC gc, XFontStruct* font, WindowPositionInfo* info, char pas
             }
         }
     }
+    /*stbi_image_free(img_data);*/
 }
 
 Bool
@@ -302,6 +342,157 @@ parse_options(int argc, char** argv)
     return True;
 }
 
+// NOTE(ktravis): the following have been ported from https://github.com/r00tman/corrupter
+// it's not 100% correct or the same yet, but it's close
+
+// force x to stay in [0, b) range. x is assumed to be in [-b,2*b) range
+int wrap(int x, int b) {
+    if (x < 0) {
+        return x + b;
+    }
+    if (x >= b) {
+        return x - b;
+    }
+    return x;
+}
+
+// get normally distributed (rounded to int) value with the specified std. dev.
+int offset(double stddev) {
+    return (int)(r4_nor_value() * stddev);
+}
+
+// brighten the color safely, i.e., by simultaneously reducing contrast
+uint8_t brighten(uint8_t r, uint8_t add) {
+    uint32_t r32 = (uint32_t)(r);
+    uint32_t add32 = (uint32_t)(add);
+    return (uint8_t)(r32 - r32*add32/255 + add32);
+}
+
+void corrupt_it(DATA32 *data, int w, int h) {
+    srand(0);
+    r4_nor_setup();
+
+    double mag = 7.0;
+    int bheight = 10;
+    double boffset = 30.0;
+    double stride_mag = 0.1;
+    double lag = 0.005;
+    double lr = -7.0;
+    double lg = 0.0;
+    double lb = 3.0;
+    double std_offset = 10.0;
+    uint8_t add = 37;
+    int meanabber = 10;
+    double stdabber = 10.0;
+
+    int line_off = 0;
+    double stride = 0.0;
+    int yset = 0;
+
+    int m_raw_stride = 4*w;
+
+    uint8_t *real_src = (uint8_t*)data;
+
+    uint8_t *buf1 = malloc(4*w*h);
+    uint8_t *buf2 = malloc(4*w*h);
+
+    uint8_t *src = real_src;
+    uint8_t *dst = buf1;
+
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+			// Every BHEIGHT lines in average a new distorted block begins
+			if ((rand() % (bheight*w)) == 0) {
+				line_off = offset(boffset);
+				stride = stride_mag*r4_nor_value();
+				yset = y;
+			}
+			// at the line where the block has begun, we don't want to offset the image
+			// so stride_off is 0 on the block's line
+			int stride_off = (int)(stride * (double)(y-yset));
+
+			// offset is composed of the blur, block offset, and skew offset (stride)
+			int offx = offset(mag) + line_off + stride_off;
+			int offy = offset(mag);
+
+			// copy the corresponding pixel (4 bytes) to the new image
+			int src_idx = m_raw_stride*wrap(y+offy, h) + 4*wrap(x+offx, w);
+			int dst_idx = m_raw_stride*y + 4*x;
+
+			memcpy(&dst[dst_idx], &src[src_idx], 4);
+		}
+	}
+
+    src = dst;
+    dst = buf2;
+
+	// second stage is adding per-channel scan inconsistency and brightening
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            lr += lag * r4_nor_value();
+            lg += lag * r4_nor_value();
+            lb += lag * r4_nor_value();
+            int offx = offset(std_offset);
+
+            // obtain source pixel base offsets. red/blue border is also smoothed by offx
+            int ra_idx = m_raw_stride*y + 4*wrap(x+(int)(lr)-offx, w);
+            int g_idx  = m_raw_stride*y + 4*wrap(x+(int)(lg), w);
+            int b_idx  = m_raw_stride*y + 4*wrap(x+(int)(lb)+offx, w);
+
+            // pixels are stored in (b, g, r, a) order in memory
+            uint8_t b = src[b_idx+0];
+            uint8_t g = src[g_idx+1];
+            uint8_t r = src[ra_idx+2];
+            uint8_t a = src[ra_idx+3];
+
+            b = brighten(b, add);
+            g = brighten(g, add);
+            r = brighten(r, add);
+
+            // copy the corresponding pixel (4 bytes) to the new image
+			int dst_idx = m_raw_stride*y + 4*x;
+
+            dst[dst_idx+0] = b;
+            dst[dst_idx+1] = g;
+            dst[dst_idx+2] = r;
+            dst[dst_idx+3] = a;
+        }
+    }
+
+    src = dst;
+    dst = real_src;
+
+	/*// third stage is to add chromatic abberation+chromatic trails*/
+	/*// (trails happen because we're changing the same image we process)*/
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            int offx = meanabber + offset(stdabber); // lower offset arg = longer trails
+
+            // obtain source pixel base offsets. only red and blue are distorted
+            int ra_idx = m_raw_stride*y + 4*wrap(x+offx, w);
+            int g_idx  = m_raw_stride*y + 4*x;
+            int b_idx  = m_raw_stride*y + 4*wrap(x-offx, w);
+
+            // pixels are stored in (b, g, r, a) order in memory
+            uint8_t b = src[b_idx+0];
+            uint8_t g = src[g_idx+1];
+            uint8_t r = src[ra_idx+2];
+            uint8_t a = src[ra_idx+3];
+
+            // copy the corresponding pixel (4 bytes) to the SAME image. this gets us nice colorful trails
+            int dst_idx = m_raw_stride*y + 4*x;
+
+            dst[dst_idx+0] = b;
+            dst[dst_idx+1] = g;
+            dst[dst_idx+2] = r;
+            dst[dst_idx+3] = a;
+        }
+    }
+
+}
+
+// -- end ported section
+
 int
 main(int argc, char** argv) {
     char passdisp[256];
@@ -321,7 +512,7 @@ main(int argc, char** argv) {
 
     /* set default values for command-line arguments */
     opt_passchar = "*";
-    opt_font = "-misc-fixed-medium-r-*--17-120-*-*-*-*-iso8859-1";
+    opt_font = "-xos4-terminus-medium-r-normal--32-320-72-72-c-160-iso10646-1";
     opt_username = username;
     opt_hidelength = False;
 
@@ -352,6 +543,16 @@ main(int argc, char** argv) {
 
     screen_num = DefaultScreen(dpy);
     root = DefaultRootWindow(dpy);
+
+    Visual *vis = DefaultVisual(dpy, screen_num);
+    /*int depth = DefaultDepth(dpy, XScreenNumberOfScreen(scr));*/
+    Colormap cm = DefaultColormap(dpy, screen_num);
+
+    imlib_context_set_display(dpy);
+    imlib_context_set_visual(vis);
+    imlib_context_set_colormap(cm);
+    imlib_context_set_color_modifier(NULL);
+    imlib_context_set_operation(IMLIB_OP_COPY);
 
     /* get display/output size and position */
     {
@@ -395,6 +596,13 @@ main(int argc, char** argv) {
         XRRFreeOutputInfo(output_info);
         XRRFreeCrtcInfo(crtc_info);
     }
+
+    image = gib_imlib_create_image_from_drawable(root, 0, info.output_x, info.output_y, info.output_width, info.output_height, 0);
+    imlib_context_set_image(image);
+    /*gib_imlib_image_blur(image, 5);*/
+    DATA32 *data = imlib_image_get_data();
+    corrupt_it(data, info.output_width, info.output_height);
+    imlib_image_put_back_data(data);
 
     /* allocate colors */
     {
