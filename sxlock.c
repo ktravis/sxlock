@@ -155,7 +155,7 @@ handle_signal(int sig) {
 Imlib_Image image;
 
 void
-main_loop(Window w, GC gc, XFontStruct* font, WindowPositionInfo* info, char passdisp[256], char* username, XColor UNUSED(black), XColor white, XColor red, Bool hidelength) {
+main_loop(Window w, GC gc, XFontStruct* font, WindowPositionInfo* info, char passdisp[256], char* username, XColor black, XColor white, XColor red, Bool hidelength) {
     XEvent event;
     KeySym ksym;
 
@@ -186,15 +186,18 @@ main_loop(Window w, GC gc, XFontStruct* font, WindowPositionInfo* info, char pas
         /*p[2] = x;*/
     /*}*/
 
-    /*XImage *img = XCreateImage(dpy, DefaultVisual(dpy, DefaultScreen(dpy)), 24, ZPixmap, 0, img_data, info->output_width, info->output_height, 32, 0);*/
-
     /* define base coordinates - middle of screen */
     int base_x = info->output_x + info->output_width / 2;
     int base_y = info->output_y + info->output_height / 2;    /* y-position of the line */
 
+    int line_width = info->output_width / 4;
+    if (line_width > 800) {
+        line_width = 800;
+    }
+
     /* not changed in the loop */
-    int line_x_left = base_x - info->output_width / 8;
-    int line_x_right = base_x + info->output_width / 8;
+    int line_x_left = base_x - line_width / 2;
+    int line_x_right = base_x + line_width / 2;
 
     /* font properties */
     int ascent, descent;
@@ -204,8 +207,11 @@ main_loop(Window w, GC gc, XFontStruct* font, WindowPositionInfo* info, char pas
         XTextExtents(font, passdisp, strlen(username), &dir, &ascent, &descent, &overall);
     }
 
-    /*XPutImage(dpy, w, gc, img, 0, 0, info->output_x, info->output_y, info->output_width, info->output_height);*/
-    gib_imlib_render_image_on_drawable(w, image, info->output_x, info->output_y, 0, 0, 0);
+    int backdrop_w = line_x_right-line_x_left+60;
+    int backdrop_h = 200;
+
+    XClearArea(dpy, w, info->output_x, info->output_y, info->output_width, info->output_height, False);
+
     /* main event loop */
     while(running && !XNextEvent(dpy, &event)) {
         if (sleepmode && using_dpms)
@@ -213,10 +219,15 @@ main_loop(Window w, GC gc, XFontStruct* font, WindowPositionInfo* info, char pas
 
         /* update window if no events pending */
         if (!XPending(dpy)) {
-
             /*XSetForeground(dpy, gc, red.pixel);*/
             /*XFillRectangle(dpy, w, gc, info->output_x, info->output_y, info->output_width, info->output_height);*/
             /*XSetForeground(dpy, gc, white.pixel);*/
+
+            /*gib_imlib_render_image_part_on_drawable_at_size	(w, image, (info->output_width-backdrop_w)/2, (info->output_height-backdrop_h)/2, backdrop_w, backdrop_h, info->output_x+(info->output_width-backdrop_w)/2, info->output_y+(info->output_height-backdrop_h)/2, backdrop_w, backdrop_h, 0, 0, 0);*/
+
+            /*XSetForeground(dpy, gc, black.pixel);*/
+            /*XFillRectangle(dpy, w, gc, info->output_x+(info->output_width-backdrop_w)/2, info->output_y+(info->output_height-backdrop_h)/2, backdrop_w, backdrop_h);*/
+            XSetForeground(dpy, gc, white.pixel);
 
             int x;
             /* draw username and line */
@@ -225,11 +236,7 @@ main_loop(Window w, GC gc, XFontStruct* font, WindowPositionInfo* info, char pas
             XDrawLine(dpy, w, gc, line_x_left, base_y, line_x_right, base_y);
 
             /* clear old passdisp */
-            /*XClearArea(dpy, w, info->output_x, base_y + 20, info->output_width, ascent + descent, False);*/
-
-            /*XPutImage(dpy, w, gc, img, 0, base_y+20, info->output_x, base_y+20, info->output_width, ascent+descent);*/
-
-            gib_imlib_render_image_part_on_drawable_at_size	(w, image, 0, base_y+20, info->output_width, ascent+descent, info->output_x, base_y+20, info->output_width, ascent+descent, 0, 0, 0);
+            XClearArea(dpy, w, info->output_x, base_y + 20, info->output_width, ascent + descent, False);
 
             /* draw new passdisp or 'auth failed' */
             if (failed) {
@@ -604,6 +611,10 @@ main(int argc, char** argv) {
     corrupt_it(data, info.output_width, info.output_height);
     imlib_image_put_back_data(data);
 
+    {
+        /*XFreePixmap(dpy, pmap);*/
+    }
+
     /* allocate colors */
     {
         XColor dummy;
@@ -639,6 +650,11 @@ main(int argc, char** argv) {
         gc = XCreateGC(dpy, w, (unsigned long)0, &values);
         XSetFont(dpy, gc, font->fid);
         XSetForeground(dpy, gc, white.pixel);
+        Pixmap gbpix = XCreatePixmap(dpy, w, info.output_width, info.output_height, DefaultDepth(dpy, screen_num));
+        XImage *img = XCreateImage(dpy, DefaultVisual(dpy, DefaultScreen(dpy)), 24, ZPixmap, 0, (char*)data, info.output_width, info.output_height, 32, 0);
+        XPutImage(dpy, gbpix, gc, img, 0, 0, 0, 0, info.output_width, info.output_height);
+        XSetWindowBackgroundPixmap(dpy, w, gbpix);
+        XFreePixmap(dpy, gbpix);
     }
 
     /* grab pointer and keyboard */
