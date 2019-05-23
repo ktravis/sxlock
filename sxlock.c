@@ -43,6 +43,7 @@
 #include <X11/Xutil.h>
 #include <X11/extensions/dpms.h>
 #include <X11/extensions/Xrandr.h>
+#include <X11/extensions/Xdbe.h>
 #include <security/pam_appl.h>
 #include <giblib/giblib.h>
 
@@ -73,12 +74,20 @@ static char* opt_font;
 static char* opt_username;
 static char* opt_passchar;
 static Bool  opt_hidelength;
+static Bool  opt_primary;
 
 /* need globals for signal handling */
 Display *dpy;
 Dpms dpms_original = { .state = True, .level = 0, .standby = 600, .suspend = 600, .off = 600 };  // holds original values
 int dpms_timeout = 10;  // dpms timeout until program exits
 Bool using_dpms;
+
+XdbeBackBuffer bb;
+static XImage *bd_img;
+static int backdrop_width,
+           backdrop_height,
+           backdrop_x,
+           backdrop_y;
 
 pam_handle_t *pam_handle;
 struct pam_conv conv = { conv_callback, NULL };
@@ -166,26 +175,6 @@ main_loop(Window w, GC gc, XFontStruct* font, WindowPositionInfo* info, char pas
 
     XSync(dpy, False);
 
-    /*char *img_data = malloc(ww * hh * 4);*/
-    /*imlib_context_set_image(image);*/
-    /*[>imlib_image_set_has_alpha(1);<]*/
-    /*DATA32 *imagedata = imlib_image_get_data();*/
-    /*memcpy(imagedata, img_data, ww * hh * 4);*/
-
-    /*int img_x, img_y, img_n;*/
-    /*unsigned char *img_data = stbi_load(img_filename, &img_x, &img_y, &img_n, 4);*/
-    /*if (!img_data) {*/
-        /*fprintf(stderr, "Image failed to load\n");*/
-        /*return;*/
-    /*}*/
-    /*// image loads as BGRA */
-    /*for (int i = 0; i < img_x * img_y; i++) {*/
-        /*unsigned char *p = &img_data[i*4];*/
-        /*unsigned char x = p[0];*/
-        /*p[0] = p[2];*/
-        /*p[2] = x;*/
-    /*}*/
-
     /* define base coordinates - middle of screen */
     int base_x = info->output_x + info->output_width / 2;
     int base_y = info->output_y + info->output_height / 2;    /* y-position of the line */
@@ -207,10 +196,18 @@ main_loop(Window w, GC gc, XFontStruct* font, WindowPositionInfo* info, char pas
         XTextExtents(font, passdisp, strlen(username), &dir, &ascent, &descent, &overall);
     }
 
-    int backdrop_w = line_x_right-line_x_left+60;
-    int backdrop_h = 200;
+    XdbeSwapInfo swapInfo;
+    swapInfo.swap_window = w;
+    swapInfo.swap_action = XdbeBackground;
+
+    if (!XdbeSwapBuffers(dpy, &swapInfo, 1)) {
+        fprintf(stderr, "swap buffers failed!\n");
+        return;
+    }
 
     XClearArea(dpy, w, info->output_x, info->output_y, info->output_width, info->output_height, False);
+
+    XMapRaised(dpy, w);
 
     /* main event loop */
     while(running && !XNextEvent(dpy, &event)) {
@@ -219,37 +216,32 @@ main_loop(Window w, GC gc, XFontStruct* font, WindowPositionInfo* info, char pas
 
         /* update window if no events pending */
         if (!XPending(dpy)) {
-            /*XSetForeground(dpy, gc, red.pixel);*/
-            /*XFillRectangle(dpy, w, gc, info->output_x, info->output_y, info->output_width, info->output_height);*/
-            /*XSetForeground(dpy, gc, white.pixel);*/
+            // draw backdrop
+            XPutImage(dpy, bb, gc, bd_img, 0, 0, backdrop_x, backdrop_y, backdrop_width, backdrop_height);
 
-            /*gib_imlib_render_image_part_on_drawable_at_size	(w, image, (info->output_width-backdrop_w)/2, (info->output_height-backdrop_h)/2, backdrop_w, backdrop_h, info->output_x+(info->output_width-backdrop_w)/2, info->output_y+(info->output_height-backdrop_h)/2, backdrop_w, backdrop_h, 0, 0, 0);*/
-
-            /*XSetForeground(dpy, gc, black.pixel);*/
-            /*XFillRectangle(dpy, w, gc, info->output_x+(info->output_width-backdrop_w)/2, info->output_y+(info->output_height-backdrop_h)/2, backdrop_w, backdrop_h);*/
+            // draw username and separator
             XSetForeground(dpy, gc, white.pixel);
-
-            int x;
-            /* draw username and line */
-            x = base_x - XTextWidth(font, username, strlen(username)) / 2;
-            XDrawString(dpy, w, gc, x, base_y - 10, username, strlen(username));
-            XDrawLine(dpy, w, gc, line_x_left, base_y, line_x_right, base_y);
-
-            /* clear old passdisp */
-            XClearArea(dpy, w, info->output_x, base_y + 20, info->output_width, ascent + descent, False);
+            int x = base_x - XTextWidth(font, username, strlen(username)) / 2;
+            XDrawString(dpy, bb, gc, x, base_y - 10, username, strlen(username));
+            XDrawLine(dpy, bb, gc, line_x_left, base_y, line_x_right, base_y);
 
             /* draw new passdisp or 'auth failed' */
             if (failed) {
                 x = base_x - XTextWidth(font, "authentication failed", 21) / 2;
                 XSetForeground(dpy, gc, red.pixel);
-                XDrawString(dpy, w, gc, x, base_y + ascent + 20, "authentication failed", 21);
+                XDrawString(dpy, bb, gc, x, base_y + ascent + 20, "authentication failed", 21);
                 XSetForeground(dpy, gc, white.pixel);
             } else {
                 int lendisp = len;
                 if (hidelength && len > 0)
                     lendisp += (passdisp[len] * len) % 5;
                 x = base_x - XTextWidth(font, passdisp, lendisp) / 2;
-                XDrawString(dpy, w, gc, x, base_y + ascent + 20, passdisp, lendisp % 256);
+                XDrawString(dpy, bb, gc, x, base_y + ascent + 20, passdisp, lendisp % 256);
+            }
+
+            if (!XdbeSwapBuffers(dpy, &swapInfo, 1)) {
+                fprintf(stderr, "swap buffers failed!\n");
+                return;
             }
         }
 
@@ -294,13 +286,13 @@ main_loop(Window w, GC gc, XFontStruct* font, WindowPositionInfo* info, char pas
             }
         }
     }
-    /*stbi_image_free(img_data);*/
 }
 
 Bool
 parse_options(int argc, char** argv)
 {
     static struct option opts[] = {
+        { "primary",        no_argument,       0, '1' },
         { "font",           required_argument, 0, 'f' },
         { "help",           no_argument,       0, 'h' },
         { "passchar",       required_argument, 0, 'p' },
@@ -311,17 +303,21 @@ parse_options(int argc, char** argv)
     };
 
     for (;;) {
-        int opt = getopt_long(argc, argv, "f:hp:u:vl", opts, NULL);
+        int opt = getopt_long(argc, argv, "1f:hp:u:vl", opts, NULL);
         if (opt == -1)
             break;
 
         switch (opt) {
+            case '1':
+                opt_primary = True;
+                break;
             case 'f':
                 opt_font = optarg;
                 break;
             case 'h':
                 die("usage: "PROGNAME" [-hvd] [-p passchars] [-f font] [-u username]\n"
                     "   -h: show this help page and exit\n"
+                    "   -1: only show background on primary screen\n"
                     "   -v: show version info and exit\n"
                     "   -l: derange the password length indicator\n"
                     "   -p passchars: characters used to obfuscate the password\n"
@@ -363,9 +359,26 @@ int wrap(int x, int b) {
     return x;
 }
 
+#define NUM_RAND_FLOATS 15000000
+float rnjesus[NUM_RAND_FLOATS];
+
+static inline float nrandf() {
+    static int start = 0;
+    start = (start+1) % NUM_RAND_FLOATS;
+    return rnjesus[start];
+}
+
+static void rand_init() {
+    srand(0);
+    r4_nor_setup();
+    for (int i = 0; i < NUM_RAND_FLOATS; i++) {
+        rnjesus[i] = r4_nor_value();
+    }
+}
+
 // get normally distributed (rounded to int) value with the specified std. dev.
 int offset(double stddev) {
-    return (int)(r4_nor_value() * stddev);
+    return (int)(nrandf() * stddev);
 }
 
 // brighten the color safely, i.e., by simultaneously reducing contrast
@@ -376,8 +389,7 @@ uint8_t brighten(uint8_t r, uint8_t add) {
 }
 
 void corrupt_it(DATA32 *data, int w, int h) {
-    srand(0);
-    r4_nor_setup();
+    rand_init();
 
     double mag = 7.0;
     int bheight = 10;
@@ -411,7 +423,7 @@ void corrupt_it(DATA32 *data, int w, int h) {
 			// Every BHEIGHT lines in average a new distorted block begins
 			if ((rand() % (bheight*w)) == 0) {
 				line_off = offset(boffset);
-				stride = stride_mag*r4_nor_value();
+				stride = stride_mag*nrandf();
 				yset = y;
 			}
 			// at the line where the block has begun, we don't want to offset the image
@@ -436,9 +448,9 @@ void corrupt_it(DATA32 *data, int w, int h) {
 	// second stage is adding per-channel scan inconsistency and brightening
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
-            lr += lag * r4_nor_value();
-            lg += lag * r4_nor_value();
-            lb += lag * r4_nor_value();
+            lr += lag * nrandf();
+            lg += lag * nrandf();
+            lb += lag * nrandf();
             int offx = offset(std_offset);
 
             // obtain source pixel base offsets. red/blue border is also smoothed by offx
@@ -555,12 +567,6 @@ main(int argc, char** argv) {
     /*int depth = DefaultDepth(dpy, XScreenNumberOfScreen(scr));*/
     Colormap cm = DefaultColormap(dpy, screen_num);
 
-    imlib_context_set_display(dpy);
-    imlib_context_set_visual(vis);
-    imlib_context_set_colormap(cm);
-    imlib_context_set_color_modifier(NULL);
-    imlib_context_set_operation(IMLIB_OP_COPY);
-
     /* get display/output size and position */
     {
         XRRScreenResources* screen = NULL;
@@ -604,17 +610,6 @@ main(int argc, char** argv) {
         XRRFreeCrtcInfo(crtc_info);
     }
 
-    image = gib_imlib_create_image_from_drawable(root, 0, info.output_x, info.output_y, info.output_width, info.output_height, 0);
-    imlib_context_set_image(image);
-    /*gib_imlib_image_blur(image, 5);*/
-    DATA32 *data = imlib_image_get_data();
-    corrupt_it(data, info.output_width, info.output_height);
-    imlib_image_put_back_data(data);
-
-    {
-        /*XFreePixmap(dpy, pmap);*/
-    }
-
     /* allocate colors */
     {
         XColor dummy;
@@ -624,6 +619,36 @@ main(int argc, char** argv) {
         XAllocNamedColor(dpy, cmap, "white", &white, &dummy);
     }
 
+    {
+        int major, minor;
+        if (!XdbeQueryExtension(dpy, &major, &minor)) {
+            fprintf(stderr, "double buffering/xdbe not supported ...\n");
+            return 1;
+        }
+        int numScreens = 1;
+        Drawable screens[] = { root };
+        XdbeScreenVisualInfo *info = XdbeGetVisualInfo(dpy, screens, &numScreens);
+        if (!info || numScreens < 1 || info->count < 1) {
+            fprintf(stderr, "created window does not support xdbe ...\n");
+            return 1;
+        }
+
+        XVisualInfo xvisinfo_templ;
+        xvisinfo_templ.visualid = info->visinfo[0].visual;
+        xvisinfo_templ.screen = 0;
+        xvisinfo_templ.depth = info->visinfo[0].depth;
+
+        int matches;
+        XVisualInfo *xvisinfo_match = XGetVisualInfo(dpy, VisualIDMask|VisualScreenMask|VisualDepthMask, &xvisinfo_templ, &matches);
+
+        if (!xvisinfo_match || matches < 1) {
+            fprintf(stderr, "no visual found with double buffering ...\n");
+            return 1;
+        }
+
+        vis = xvisinfo_match->visual;
+    }
+
     /* create window */
     {
         XSetWindowAttributes wa;
@@ -631,8 +656,10 @@ main(int argc, char** argv) {
         wa.background_pixel = black.pixel;
         w = XCreateWindow(dpy, root, 0, 0, info.display_width, info.display_height,
                 0, DefaultDepth(dpy, screen_num), CopyFromParent,
-                DefaultVisual(dpy, screen_num), CWOverrideRedirect | CWBackPixel, &wa);
-        XMapRaised(dpy, w);
+                vis, CWOverrideRedirect | CWBackPixel, &wa);
+
+        bb = XdbeAllocateBackBufferName(dpy, w, XdbeBackground);
+        XSelectInput(dpy, w, StructureNotifyMask);
     }
 
     /* define cursor */
@@ -644,18 +671,79 @@ main(int argc, char** argv) {
         XFreePixmap(dpy, pmap);
     }
 
+    /*char *img_data = malloc(ww * hh * 4);*/
+    /*imlib_context_set_image(image);*/
+    /*[>imlib_image_set_has_alpha(1);<]*/
+    /*DATA32 *imagedata = imlib_image_get_data();*/
+    /*memcpy(imagedata, img_data, ww * hh * 4);*/
+
+    /*int img_x, img_y, img_n;*/
+    /*unsigned char *img_data = stbi_load(img_filename, &img_x, &img_y, &img_n, 4);*/
+    /*if (!img_data) {*/
+        /*fprintf(stderr, "Image failed to load\n");*/
+        /*return;*/
+    /*}*/
+    /*// image loads as BGRA */
+    /*for (int i = 0; i < img_x * img_y; i++) {*/
+        /*unsigned char *p = &img_data[i*4];*/
+        /*unsigned char x = p[0];*/
+        /*p[0] = p[2];*/
+        /*p[2] = x;*/
+    /*}*/
+
+    imlib_context_set_display(dpy);
+    imlib_context_set_visual(vis);
+    imlib_context_set_colormap(cm);
+    imlib_context_set_color_modifier(NULL);
+    imlib_context_set_operation(IMLIB_OP_COPY);
+
+    int capture_x = opt_primary ? info.output_x : 0;
+    int capture_y = opt_primary ? info.output_y : 0;
+    int capture_width = opt_primary ? info.output_width : info.display_width;
+    int capture_height = opt_primary ? info.output_height : info.display_height;
+
+    image = gib_imlib_create_image_from_drawable(root, 0, capture_x, capture_y, capture_width, capture_height, 0);
+
+    imlib_context_set_image(image);
+    /*gib_imlib_image_blur(image, 5);*/
+    DATA32 *data = imlib_image_get_data();
+    corrupt_it(data, capture_width, capture_height);
+    imlib_image_put_back_data(data);
+
     /* create Graphics Context */
     {
         XGCValues values;
         gc = XCreateGC(dpy, w, (unsigned long)0, &values);
         XSetFont(dpy, gc, font->fid);
+        XSetForeground(dpy, gc, black.pixel);
+
+        Pixmap gbpix = XCreatePixmap(dpy, w, info.display_width, info.display_height, DefaultDepth(dpy, screen_num));
+        XFillRectangle(dpy, gbpix, gc, 0, 0, info.display_width, info.display_height);
         XSetForeground(dpy, gc, white.pixel);
-        Pixmap gbpix = XCreatePixmap(dpy, w, info.output_width, info.output_height, DefaultDepth(dpy, screen_num));
-        XImage *img = XCreateImage(dpy, DefaultVisual(dpy, DefaultScreen(dpy)), 24, ZPixmap, 0, (char*)data, info.output_width, info.output_height, 32, 0);
-        XPutImage(dpy, gbpix, gc, img, 0, 0, 0, 0, info.output_width, info.output_height);
+        XImage *img = XCreateImage(dpy, vis, 24, ZPixmap, 0, (char*)data, capture_width, capture_height, 32, 0);
+        XPutImage(dpy, gbpix, gc, img, 0, 0, capture_x, capture_y, capture_width, capture_height);
         XSetWindowBackgroundPixmap(dpy, w, gbpix);
         XFreePixmap(dpy, gbpix);
+
+        XPutImage(dpy, bb, gc, img, 0, 0, capture_x, capture_y, capture_width, capture_height);
+        XClearArea(dpy, w, info.output_x, info.output_y, info.output_width, info.output_height, False);
     }
+
+    backdrop_width = info.output_width / 4;
+    if (backdrop_width > 1000)
+        backdrop_width = 1000;
+    backdrop_height = 400;
+    backdrop_x = info.output_x + info.output_width/2 - backdrop_width/2;
+    backdrop_y = info.output_y + info.output_height/2 - backdrop_height/2;
+
+    uint32_t *bd_data = malloc(sizeof(uint32_t) * backdrop_width * backdrop_height);
+    for (int x = 0; x < backdrop_width; x++) {
+        for (int y = 0; y < backdrop_height; y++) {
+            DATA32 p = data[x+backdrop_x + (y+backdrop_y)*capture_width];
+            bd_data[x + y*backdrop_width] = p & 0x00dbdbdb;
+        }
+    }
+    bd_img = XCreateImage(dpy, vis, 24, ZPixmap, 0, (char*)bd_data, backdrop_width, backdrop_height, 32, 0);
 
     /* grab pointer and keyboard */
     int len = 1000;
@@ -715,5 +803,6 @@ main(int argc, char** argv) {
     XFreeGC(dpy, gc);
     XDestroyWindow(dpy, w);
     XCloseDisplay(dpy);
+    /*stbi_image_free(img_data);*/
     return 0;
 }
